@@ -1,47 +1,88 @@
-import os
-import json
-import numpy as np
 import pandas as pd
-from sentence_transformers import SentenceTransformer
+import re
+import json
+import os
+from nltk.stem import WordNetLemmatizer
+from nltk.tokenize import word_tokenize
+import nltk
 
-def load_data(data_dir: str):
-    companies_path = os.path.join(data_dir, 'companies_clean.csv')
-    taxonomy_path = os.path.join(data_dir, 'taxonomy_expanded.json')
-    df = pd.read_csv(companies_path)
-    with open(taxonomy_path, 'r', encoding='utf-8') as f:
-        taxonomy = json.load(f)
-    return df, taxonomy
+# Download necessary NLTK data (for first run)
+nltk.download('punkt')
+nltk.download('wordnet')
 
-def generate_embeddings(texts: list, model_name: str = 'all-MiniLM-L6-v2') -> np.ndarray:
+
+def clean_text(text: str) -> str:
     """
-    Generate embeddings for a list of texts using SentenceTransformer.
+    Basic text cleaning:
+     - lowercasing
+     - remove non-alphanumeric characters
+     - collapse multiple spaces
     """
-    model = SentenceTransformer(model_name)
-    embeddings = model.encode(texts, show_progress_bar=True)
-    return embeddings
+    if not isinstance(text, str):
+        return ''
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def expand_taxonomy(labels: list) -> dict:
+    """
+    Build an expanded mapping for each label:
+     - original label
+     - lowercase label
+     - lemmatized form
+    Returns a dict: {label: [variants...]}
+    """
+    lemmatizer = WordNetLemmatizer()
+    expanded = {}
+    for label in labels:
+        base = label.strip()
+        lower = base.lower()
+        tokens = lower.split()
+        lemmas = [lemmatizer.lemmatize(tok) for tok in tokens]
+        lemma_label = " ".join(lemmas)
+        variants = list({base, lower, lemma_label})
+        expanded[base] = variants
+    return expanded
 
 
 def main():
-    # Paths
     data_dir = os.path.join(os.getcwd(), 'data')
-    out_dir = data_dir
-    os.makedirs(out_dir, exist_ok=True)
+    company_file = os.path.join(data_dir, 'company_list.csv')
+    taxonomy_file = os.path.join(data_dir, 'insurance_taxonomy.csv')
 
-    # Load cleaned data and expanded taxonomy
-    df, taxonomy = load_data(data_dir)
+    out_companies = os.path.join(data_dir, 'companies_clean.csv')
+    out_taxonomy = os.path.join(data_dir, 'taxonomy_expanded.json')
 
-    # Company embeddings
-    company_texts = df['cleaned_text'].astype(str).tolist()
-    company_embeddings = generate_embeddings(company_texts)
-    np.save(os.path.join(out_dir, 'company_embeddings.npy'), company_embeddings)
-    print(f"Saved company_embeddings.npy with shape {company_embeddings.shape}")
+    # Load company data with fallback encoding
+    try:
+        df = pd.read_csv(company_file, encoding='latin-1', engine='python')
+    except Exception:
+        df = pd.read_csv(company_file, encoding='utf-8', engine='python')
 
-    # Label embeddings: use the variants or just the label itself
-    labels = list(taxonomy.keys())
-    # We can embed the label names directly
-    label_embeddings = generate_embeddings(labels)
-    np.save(os.path.join(out_dir, 'label_embeddings.npy'), label_embeddings)
-    print(f"Saved label_embeddings.npy with shape {label_embeddings.shape}")
+    # Adjust these column names to your exact headers
+    text_cols = ['description', 'business_tags', 'sector', 'category', 'niche']
+    df['cleaned_text'] = df[text_cols].fillna('').agg(' '.join, axis=1).apply(clean_text)
+    df.to_csv(out_companies, index=False)
+    print(f"Saved cleaned companies to {out_companies}")
+
+    # Load taxonomy labels with same encoding strategy
+    try:
+        tax_df = pd.read_csv(taxonomy_file, encoding='latin-1', engine='python')
+    except Exception:
+        tax_df = pd.read_csv(taxonomy_file, encoding='utf-8', engine='python')
+
+    if 'label' in tax_df.columns:
+        labels = tax_df['label'].dropna().astype(str).tolist()
+    else:
+        labels = tax_df.iloc[:, 0].dropna().astype(str).tolist()
+
+    expanded = expand_taxonomy(labels)
+    with open(out_taxonomy, 'w', encoding='utf-8') as f:
+        json.dump(expanded, f, ensure_ascii=False, indent=2)
+    print(f"Saved expanded taxonomy to {out_taxonomy}")
+
 
 if __name__ == '__main__':
     main()

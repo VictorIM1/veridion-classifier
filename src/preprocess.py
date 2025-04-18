@@ -2,48 +2,33 @@ import pandas as pd
 import re
 import json
 import os
+import chardet
+import io
+import csv
 from nltk.stem import WordNetLemmatizer
 from nltk.tokenize import word_tokenize
 import nltk
 
-# Download necessary NLTK data (for first run)
 nltk.download('punkt')
 nltk.download('wordnet')
 
 
 def clean_text(text: str) -> str:
-    """
-    Basic text cleaning:
-     - lowercasing
-     - remove non-alphanumeric characters
-     - collapse multiple spaces
-    """
     if not isinstance(text, str):
         return ''
-    # lower
     text = text.lower()
-    # remove punctuation and special chars
     text = re.sub(r"[^a-z0-9\s]", " ", text)
-    # collapse spaces
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
 def expand_taxonomy(labels: list) -> dict:
-    """
-    Build an expanded mapping for each label:
-     - original label
-     - lowercase label
-     - lemmatized form
-    Returns a dict: {label: [variants...]}
-    """
     lemmatizer = WordNetLemmatizer()
     expanded = {}
     for label in labels:
         base = label.strip()
         lower = base.lower()
-        # tokenize and lemmatize each token
-        tokens = word_tokenize(lower)
+        tokens = lower.split()
         lemmas = [lemmatizer.lemmatize(tok) for tok in tokens]
         lemma_label = " ".join(lemmas)
         variants = list({base, lower, lemma_label})
@@ -51,46 +36,71 @@ def expand_taxonomy(labels: list) -> dict:
     return expanded
 
 
+def detect_encoding(filepath: str, n_bytes: int = 100_000) -> str:
+    with open(filepath, 'rb') as f:
+        raw = f.read(n_bytes)
+    result = chardet.detect(raw)
+    return result['encoding'] or 'utf-8'
+
+
+def detect_delimiter(text: str) -> str:
+    """
+    Încearcă să detecteze delimitatorul (tab, virgulă, punct și virgulă, pipe).
+    Dacă Sniffer nu reușește, folosește ',' implicit.
+    """
+    try:
+        dialect = csv.Sniffer().sniff(text, delimiters=[',', '\t', ';', '|'])
+        return dialect.delimiter
+    except csv.Error:
+        print("Could not detect delimiter, defaulting to comma")
+        return ','
+
+
+
+def load_csv_with_detect(path: str) -> pd.DataFrame:
+    # detect encoding
+    enc = detect_encoding(path)
+    print(f"Detected encoding for {os.path.basename(path)}: {enc}")
+    # citește eșantion pentru delimitator
+    with open(path, 'r', encoding=enc, errors='replace') as f:
+        sample = f.read(2048)   # primele ~2KB
+    delim = detect_delimiter(sample)
+    print(f"Detected delimiter for {os.path.basename(path)}: {repr(delim)}")
+    # citește întreg fișierul
+    with open(path, 'r', encoding=enc, errors='replace') as f:
+        text = f.read()
+    return pd.read_csv(io.StringIO(text), sep=delim, engine='python')
+
+
 def main():
-    # Paths (adjust if needed)
-    data_dir = os.path.join(os.getcwd(), 'data')
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    data_dir = os.path.join(project_root, 'data')
     company_file = os.path.join(data_dir, 'company_list.csv')
     taxonomy_file = os.path.join(data_dir, 'insurance_taxonomy.csv')
 
-    # Output paths
     out_companies = os.path.join(data_dir, 'companies_clean.csv')
     out_taxonomy = os.path.join(data_dir, 'taxonomy_expanded.json')
 
-    # Load company data
-    df = pd.read_csv(company_file)
-
-    # Identify text columns (adjust names if needed)
+    # Încarcă și curăță datele de companie
+    df = load_csv_with_detect(company_file)
     text_cols = ['description', 'business_tags', 'sector', 'category', 'niche']
-
-    # Create a combined cleaned text field
-    df['cleaned_text'] = df[text_cols].fillna('').agg(' '.join, axis=1).apply(clean_text)
-
-    # Save cleaned companies
+    df['cleaned_text'] = (
+        df[text_cols]
+        .fillna('')
+        .agg(' '.join, axis=1)
+        .apply(clean_text)
+    )
     df.to_csv(out_companies, index=False)
     print(f"Saved cleaned companies to {out_companies}")
 
-    # Load taxonomy labels
-    try:
-        tax_df = pd.read_csv(taxonomy_file)
-        # assume single column of labels named 'label'
-        if 'label' in tax_df.columns:
-            labels = tax_df['label'].dropna().astype(str).tolist()
-        else:
-            # use first column
-            labels = tax_df.iloc[:, 0].dropna().astype(str).tolist()
-    except Exception as e:
-        print(f"Error reading taxonomy file: {e}")
-        return
+    # Încarcă și extinde taxonomia
+    tax_df = load_csv_with_detect(taxonomy_file)
+    if 'label' in tax_df.columns:
+        labels = tax_df['label'].dropna().astype(str).tolist()
+    else:
+        labels = tax_df.iloc[:, 0].dropna().astype(str).tolist()
 
-    # Expand taxonomy
     expanded = expand_taxonomy(labels)
-
-    # Write out json
     with open(out_taxonomy, 'w', encoding='utf-8') as f:
         json.dump(expanded, f, ensure_ascii=False, indent=2)
     print(f"Saved expanded taxonomy to {out_taxonomy}")
