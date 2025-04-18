@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+data/*.npy
+data/companies_clean.csv
+data/taxonomy_expanded.json
